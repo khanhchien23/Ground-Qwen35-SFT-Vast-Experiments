@@ -197,3 +197,38 @@ python inference_grd_vast.py \
 
 The CSV contains `ground_truth`, `prediction`, and `correct`. Compare exact class accuracy,
 not only Ground-domain accuracy.
+## Hierarchical 81-class router -> domain specialists
+
+`hierarchical_inference.py` implements the complete two-stage test flow:
+
+1. Load the 81-class router LoRA and predict a class from the image.
+2. Derive `Air`, `Ground`, or `Sea` from the router prediction prefix.
+3. Load Air/Ground/Sea LoRAs on the same Qwen3.5-9B base.
+4. Group images by predicted domain and run the matching specialist adapter.
+5. Save router output, selected adapter, specialist output, domain correctness,
+   final correctness, raw responses, and timings to CSV.
+
+All four adapters must use the same `Qwen/Qwen3.5-9B` base and compatible PEFT
+configuration. For Ground Scheduled CoT, pass the original training prompt
+Parquet with `--ground-prompt-parquet`; do not replace it with a Direct prompt.
+
+Example on Vast (Bash; replace the placeholder adapters):
+
+```bash
+python hierarchical_inference.py \
+  --data ./data/realtest.parquet \
+  --router-adapter ROUTER_ADAPTER_OR_REPO \
+  --router-checkpoint ROUTER_CHECKPOINT_IF_HF \
+  --air-adapter AIR_ADAPTER_OR_REPO \
+  --air-checkpoint AIR_CHECKPOINT_IF_HF \
+  --ground-adapter ./outputs/grd_scheduled_cot/final_adapter \
+  --sea-adapter SEA_ADAPTER_OR_REPO \
+  --sea-checkpoint SEA_CHECKPOINT_IF_HF \
+  --ground-prompt-parquet ./.hf_dataset_files/data/train-grd-only-00000-of-00002.parquet \
+  --output ./results/hierarchical_test.csv \
+  --batch-size 1 --limit 10 --no-resume
+```
+
+Use `--limit 10` first to validate adapter loading and output format. Remove
+the limit only after that test succeeds. The router never reads ground truth to
+select an adapter; ground truth is used only for evaluation columns.
