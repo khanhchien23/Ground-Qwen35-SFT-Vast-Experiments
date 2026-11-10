@@ -17,11 +17,11 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--prompt-parquet", type=Path)
-    parser.add_argument("--mode", choices=["direct", "answer_only"], default="answer_only")
+    parser.add_argument("--mode", choices=["direct", "answer_only", "scheduled_cot"], default="answer_only")
     args, remaining = parser.parse_known_args()
-    if args.mode == "answer_only":
+    if args.mode != "direct":
         if args.prompt_parquet is None:
-            parser.error("--prompt-parquet is required for answer_only")
+            parser.error("--prompt-parquet is required for CoT modes")
         prompts = pq.read_table(args.prompt_parquet, columns=["system_prompt", "user_prompt"])
         if not len(prompts):
             raise ValueError("Prompt Parquet is empty")
@@ -46,7 +46,7 @@ def main():
         return selected
 
     engine.items_from_data = ground_items
-    sys.argv = [sys.argv[0]] + remaining + ["--mode", args.mode]
+    sys.argv = [sys.argv[0]] + remaining + ["--mode", "direct" if args.mode == "direct" else "answer_only"]
     engine.main()
 
 

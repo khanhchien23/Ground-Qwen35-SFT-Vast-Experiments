@@ -28,6 +28,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from ground_prompts import DIRECT_SYSTEM, DIRECT_USER, GROUND_CLASSES
+from scheduled_cot import cosine_cot_weight, segment_normalized_loss
 
 # Hugging Face authentication is intentionally read from the environment.
 # Never put a real token in this repository or in a command committed to Git.
@@ -296,8 +297,8 @@ class MilitaryCoTSFTDataset(Dataset):
     """
 
     def __init__(self, data: Any, crop_bbox: bool = True, pad_ratio: float = 0.08, mode: str = "answer_only"):
-        if mode not in {"direct", "answer_only"}:
-            raise ValueError("mode must be direct or answer_only")
+        if mode not in {"direct", "answer_only", "scheduled_cot"}:
+            raise ValueError("Unsupported Ground training mode")
         self.data = data
         self.crop_bbox = crop_bbox
         self.pad_ratio = pad_ratio
@@ -356,6 +357,10 @@ class MilitaryCoTSFTDataset(Dataset):
         if self.mode == "direct":
             sys_text, user_text = DIRECT_SYSTEM, DIRECT_USER
             assistant_text = f"<answer>{gt_class}</answer>"
+        elif self.mode == "scheduled_cot":
+            answers = re.findall(r"<answer>(.*?)</answer>", assistant_text, re.S)
+            if len(answers) != 1 or answers[0].strip() != gt_class:
+                raise ValueError(f"Existing CoT answer does not match ground truth {gt_class!r}")
 
         prompt_messages = [
             {"role": "system", "content": [{"type": "text", "text": sys_text}]},
@@ -389,7 +394,7 @@ class GroundDataCollator:
         full_texts, prompt_texts = [], []
         for feature in features:
             assistant = feature["full_messages"][-1]["content"][0]["text"]
-            if self.mode == "answer_only":
+            if self.mode in {"answer_only", "scheduled_cot"}:
                 if not assistant.startswith("<think>\n") or "</think>" not in assistant or "<answer>" not in assistant:
                     raise ValueError("answer_only target must contain <think> and <answer>.")
             elif not assistant.startswith("<answer>") or "</answer>" not in assistant:
@@ -397,7 +402,7 @@ class GroundDataCollator:
 
             # Template chuyển thẻ <think> trong target sang reasoning_content,
             # nên chỉ có một thẻ <think> (không chèn thinking rỗng).
-            enable_thinking = self.mode == "answer_only"
+            enable_thinking = self.mode != "direct"
             full = self.processor.apply_chat_template(
                 feature["full_messages"], tokenize=False,
                 add_generation_prompt=False, enable_thinking=enable_thinking,
@@ -442,6 +447,7 @@ class GroundDataCollator:
                 "(try 1280); image/answer tokens must never be truncated."
             )
         labels = batch["input_ids"].clone()
+        segments = torch.zeros_like(labels)
         labels[batch["attention_mask"] == 0] = -100
         for i in range(len(features)):
             prompt_len = int(prompt_batch["attention_mask"][i].sum().item())
@@ -455,6 +461,28 @@ class GroundDataCollator:
             if not torch.equal(batch["input_ids"][i, start:start + prompt_len], prompt_ids):
                 raise ValueError("Prompt token không là prefix của full input_ids; không thể mask an toàn.")
             labels[i, start:start + prompt_len] = -100
+            if self.mode == "scheduled_cot":
+                # Assign </think>, answer tags, answer and EOS to the answer
+                # segment. Prompt/image/padding remain ignored. Search the
+                # rendered response prefix, not isolated answer tokens, to
+                # detect tokenizer boundary changes safely.
+                response_start = start + prompt_len
+                boundary = full_texts[i].find("</think>", len(prompt_texts[i]))
+                answer = re.search(r"<answer>(.*?)</answer>", full_texts[i][len(prompt_texts[i]):], re.S)
+                if boundary < 0 or answer is None:
+                    raise ValueError("scheduled_cot requires complete think/answer segments")
+                if answer.group(1).strip() not in GROUND_CLASSES:
+                    raise ValueError("Invalid Ground answer in existing CoT")
+                prefix = full_texts[i][:boundary]
+                # Processor expands image placeholders; tokenize only the text
+                # suffix relative to the prompt and verify against actual IDs.
+                reasoning_text = prefix[len(prompt_texts[i]):]
+                reasoning_ids = self.processor.tokenizer(reasoning_text, add_special_tokens=False)["input_ids"]
+                boundary_pos = response_start + len(reasoning_ids)
+                if not reasoning_ids or batch["input_ids"][i, response_start:boundary_pos].tolist() != reasoning_ids:
+                    raise ValueError("Reasoning token boundary mismatch; cannot segment loss safely")
+                segments[i, response_start:boundary_pos] = 1
+                segments[i, boundary_pos:start + int(lengths[i])] = 2
             if self.mode == "answer_only":
                 # Keep loss only on the answer span; CoT tokens remain context.
                 assistant = features[i]["full_messages"][-1]["content"][0]["text"]
@@ -476,6 +504,8 @@ class GroundDataCollator:
                     "hoặc giảm kích thước ảnh."
                 )
         batch["labels"] = labels
+        if self.mode == "scheduled_cot":
+            batch["loss_segments"] = segments
         return batch
 
 
@@ -493,11 +523,20 @@ class MemoryEfficientTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.pop("labels", None)
+        segments = inputs.pop("loss_segments", None)
         outputs = model(**inputs)
         if labels is None:
             return (outputs.loss, outputs) if return_outputs else outputs.loss
 
         logits = outputs.logits  # [B, L, V] ở fp16/bf16
+        if segments is not None:
+            # global_step counts optimizer updates (not accumulation microsteps).
+            weight = cosine_cot_weight(
+                self.state.global_step, self.state.max_steps,
+                self.cot_weight_start, self.cot_weight_end,
+            )
+            loss = segment_normalized_loss(logits, labels, segments, weight, self.answer_weight)
+            return (loss, outputs) if return_outputs else loss
         shift_logits = logits[..., :-1, :]
         shift_labels = labels[..., 1:]
 
@@ -700,7 +739,12 @@ def main():
     parser.add_argument("--val_ratio", type=float, default=0.05)
     parser.add_argument("--save_steps", type=int, default=250)
     parser.add_argument("--max_seq_length", type=int, default=768)
-    parser.add_argument("--mode", choices=["direct", "answer_only"], default="direct", help="direct label or existing CoT with loss only on answer")
+    parser.add_argument("--mode", choices=["direct", "answer_only", "scheduled_cot"], default="direct")
+    parser.add_argument("--cot_weight_start", type=float, default=1.0)
+    parser.add_argument("--cot_weight_end", type=float, default=0.5)
+    parser.add_argument("--answer_weight", type=float, default=1.0)
+    parser.add_argument("--stop_after_epoch", type=int, default=None,
+                        help="Pause at this cumulative epoch; keep --epochs fixed for resume")
     parser.add_argument("--crop_bbox", action="store_true", default=True)
     parser.add_argument("--no_crop_bbox", action="store_false", dest="crop_bbox")
     parser.add_argument("--hub_repo", type=str, default=None,
@@ -713,6 +757,14 @@ def main():
     parser.add_argument("--epoch_end_mode", action="store_true",
                         help="Save/evaluate at epoch boundaries and keep final epoch weights instead of best eval weights")
     args = parser.parse_args()
+    if args.stop_after_epoch is not None:
+        if not 1 <= args.stop_after_epoch <= args.epochs:
+            parser.error("stop_after_epoch must be between 1 and epochs")
+        args.epoch_end_mode = True
+    if args.mode == "scheduled_cot":
+        args.epoch_end_mode = True
+        if min(args.cot_weight_start, args.cot_weight_end) < 0 or args.answer_weight <= 0:
+            parser.error("CoT weights must be nonnegative and answer_weight positive")
     if args.logging_steps < 1 or (args.eval_steps is not None and args.eval_steps < 1):
         raise ValueError("logging_steps/eval_steps must be positive")
 
@@ -742,7 +794,7 @@ def main():
 
     if local_rank == 0:
         print("=" * 78)
-        print("CẤU HÌNH DỮ LIỆU HUẤN LUYỆN SFT CoT (81 LỚP QUÂN SỰ)")
+        print(f"GROUND-ONLY SFT: {args.mode} (30 classes)")
         print("=" * 78)
         print(f"- Nguồn dữ liệu           : {data_source_str}")
         print(f"- Số mẫu Train            : {len(train_records):,} mẫu")
@@ -812,7 +864,10 @@ def main():
                 control.should_save = True
                 if val_dataset:
                     control.should_evaluate = True
+                if cli_stop_epoch is not None and state.epoch >= cli_stop_epoch - 1e-6:
+                    control.should_training_stop = True
                 return control
+        cli_stop_epoch = args.stop_after_epoch
         callbacks.append(SaveEpochEndCallback())
     if args.hub_repo and local_rank == 0:
         try:
@@ -831,6 +886,12 @@ def main():
         data_collator=collator,
         callbacks=callbacks or None,
     )
+    # Loss is already a microbatch mean; Trainer must divide by accumulation
+    # steps rather than assume this custom model consumes num_items_in_batch.
+    trainer.model_accepts_loss_kwargs = False
+    trainer.cot_weight_start = args.cot_weight_start
+    trainer.cot_weight_end = args.cot_weight_end
+    trainer.answer_weight = args.answer_weight
 
     # 4. Tự động Resume từ checkpoint gần nhất (Local hoặc tự tải từ HuggingFace Hub trên máy ảo mới)
     last_ckpt = None
@@ -887,6 +948,38 @@ def main():
         if local_rank == 0:
             print(f"--> Phát hiện Checkpoint cũ, tiếp tục huấn luyện từ: {last_ckpt}")
 
+    if args.mode == "scheduled_cot":
+        schedule_config = {
+            "mode": args.mode, "epochs": args.epochs,
+            "batch_size": args.batch_size, "grad_accum": args.grad_accum,
+            "world_size": trainer.args.world_size, "train_samples": len(train_dataset),
+            "cot_weight_start": args.cot_weight_start, "cot_weight_end": args.cot_weight_end,
+            "answer_weight": args.answer_weight, "lr": args.lr,
+            "model_id": args.model_id, "max_seq_length": args.max_seq_length,
+            "lora_r": args.lora_r, "lora_alpha": args.lora_alpha,
+        }
+        class ScheduleStateCallback(TrainerCallback):
+            def on_train_begin(self, arguments, state, control, **kwargs):
+                config = dict(schedule_config, total_steps=state.max_steps)
+                if last_ckpt:
+                    path = Path(last_ckpt) / "scheduled_cot_config.json"
+                    if not path.is_file() or json.loads(path.read_text(encoding="utf-8")) != config:
+                        raise ValueError("Scheduled CoT resume config mismatch or missing metadata. Keep epochs/batch/weights/LR unchanged; use a separate output directory for a new run.")
+                self.config = config
+                print(f"--> Scheduled CoT: {config}")
+
+            def on_save(self, arguments, state, control, **kwargs):
+                if state.is_world_process_zero:
+                    path = Path(arguments.output_dir) / f"checkpoint-{state.global_step}" / "scheduled_cot_config.json"
+                    path.write_text(json.dumps(self.config, indent=2), encoding="utf-8")
+
+            def on_log(self, arguments, state, control, logs=None, **kwargs):
+                if logs is not None:
+                    logs["cot_weight"] = cosine_cot_weight(state.global_step, state.max_steps, args.cot_weight_start, args.cot_weight_end)
+                    logs["answer_weight"] = args.answer_weight
+
+        # Save metadata before HubPushCallback uploads the checkpoint.
+        trainer.callback_handler.callbacks.insert(0, ScheduleStateCallback())
     trainer.train(resume_from_checkpoint=last_ckpt)
     if val_dataset and local_rank == 0:
         print(f"--> Best checkpoint (eval_loss): {trainer.state.best_model_checkpoint} "
