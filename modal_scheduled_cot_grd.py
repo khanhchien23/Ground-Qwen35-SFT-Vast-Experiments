@@ -3,7 +3,8 @@
 
 Examples:
   modal run --detach modal_scheduled_cot_grd.py::train \
-    --hf-token hf_xxx --stop-after-epoch 1
+    --hf-token hf_xxx --stop-after-epoch 1 --batch-size 16 --grad-accum 1 \
+    --output-name grd_scheduled_cot_b16
 
 Keep ``epochs=3`` fixed for every resume.  Only change stop_after_epoch to
 pause after epoch 1, 2, and 3.  The trainer's checkpoint/scheduler state stays
@@ -81,9 +82,20 @@ def train_remote(
     lora_r: int,
     lora_alpha: int,
     output_dir: str,
+    fresh_start: bool,
 ):
     authenticate(hf_token)
     from huggingface_hub import HfApi, snapshot_download
+
+    if fresh_start:
+        # Never delete the previous experiment. A fresh run gets a separate
+        # output directory and therefore cannot accidentally resume old state.
+        output_path = Path(output_dir)
+        if output_path.exists():
+            raise RuntimeError(
+                f"Fresh start refused because output directory already exists: {output_dir}. "
+                "Choose a new --output-name."
+            )
 
     dataset_dir = snapshot_download(
         repo_id=dataset_repo,
@@ -151,8 +163,8 @@ def train(
     hub_repo: str = HUB_REPO,
     epochs: int = 3,
     stop_after_epoch: int = 1,
-    batch_size: int = 8,
-    grad_accum: int = 2,
+    batch_size: int = 16,
+    grad_accum: int = 1,
     lr: float = 2e-4,
     save_steps: int = 100,
     max_seq_length: int = 2048,
@@ -161,7 +173,8 @@ def train(
     eval_steps: int = 100,
     lora_r: int = 16,
     lora_alpha: int = 32,
-    output_name: str = "grd_scheduled_cot",
+    output_name: str = "grd_scheduled_cot_b16",
+    fresh_start: bool = True,
 ):
     if epochs != 3:
         raise ValueError("Scheduled CoT requires epochs=3; keep the total schedule fixed")
@@ -176,4 +189,5 @@ def train(
         token_or_error(hf_token), dataset_repo, hub_repo, epochs, stop_after_epoch,
         batch_size, grad_accum, lr, save_steps, max_seq_length, model_id,
         logging_steps, eval_steps, lora_r, lora_alpha, output_dir,
+        fresh_start,
     )
