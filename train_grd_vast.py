@@ -236,7 +236,48 @@ def load_parquet_dataset(parquet_dir_or_repo: str):
             data_files["validation"] = val_files
         ds = load_dataset("parquet", data_files=data_files)
     else:
-        ds = load_dataset(parquet_dir_or_repo)
+        # Do not call load_dataset(repo_id) here.  HF filenames such as
+        # train-grd-only-00000-of-00002.parquet make some datasets versions
+        # infer the invalid split name `train-grd-only`.  Resolve the files
+        # explicitly and assign legal split names ourselves.
+        from huggingface_hub import HfApi, hf_hub_download
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HF_HUB_TOKEN")
+        repo_files = HfApi(token=token).list_repo_files(
+            parquet_dir_or_repo, repo_type="dataset"
+        )
+        train_names = sorted(
+            f for f in repo_files
+            if f.startswith("data/train") and f.endswith(".parquet")
+        )
+        val_names = sorted(
+            f for f in repo_files
+            if f.startswith("data/validation") and f.endswith(".parquet")
+        )
+        if not train_names:
+            raise FileNotFoundError(
+                f"No data/train*.parquet files found in dataset {parquet_dir_or_repo}"
+            )
+        cache_root = Path(os.environ.get("HF_DATASETS_CACHE", "./.hf_dataset_files"))
+        cache_root.mkdir(parents=True, exist_ok=True)
+        train_files = [
+            hf_hub_download(
+                repo_id=parquet_dir_or_repo, filename=name,
+                repo_type="dataset", token=token,
+                local_dir=str(cache_root),
+            )
+            for name in train_names
+        ]
+        data_files = {"train": train_files}
+        if val_names:
+            data_files["validation"] = [
+                hf_hub_download(
+                    repo_id=parquet_dir_or_repo, filename=name,
+                    repo_type="dataset", token=token,
+                    local_dir=str(cache_root),
+                )
+                for name in val_names
+            ]
+        ds = load_dataset("parquet", data_files=data_files)
 
     train_ds = ds["train"]
     val_ds = ds["validation"] if "validation" in ds else None
