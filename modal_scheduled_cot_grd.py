@@ -88,14 +88,13 @@ def train_remote(
     from huggingface_hub import HfApi, snapshot_download
 
     if fresh_start:
-        # Never delete the previous experiment. A fresh run gets a separate
-        # output directory and therefore cannot accidentally resume old state.
+        # This mode is explicitly requested by the user: discard only this
+        # named experiment directory, never the parent volume or other runs.
         output_path = Path(output_dir)
         if output_path.exists():
-            raise RuntimeError(
-                f"Fresh start refused because output directory already exists: {output_dir}. "
-                "Choose a new --output-name."
-            )
+            print(f"--> Fresh start: removing only {output_dir}", flush=True)
+            shutil.rmtree(output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
 
     dataset_dir = snapshot_download(
         repo_id=dataset_repo,
