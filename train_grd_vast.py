@@ -28,6 +28,12 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+# Hugging Face authentication is intentionally read from the environment.
+# Never put a real token in this repository or in a command committed to Git.
+if os.environ.get("HF_TOKEN"):
+    os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", os.environ["HF_TOKEN"])
+    os.environ.setdefault("HF_HUB_TOKEN", os.environ["HF_TOKEN"])
+
 # Bật expandable_segments ngay từ đầu để chống phân mảnh bộ nhớ CUDA trên T4 15GB
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 

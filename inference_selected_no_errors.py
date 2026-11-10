@@ -32,6 +32,12 @@ import peft.tuners.lora.torchao
 peft.tuners.lora.torchao.is_torchao_available = lambda: False
 from peft import PeftModel
 
+# Hugging Face Hub reads this environment variable for private adapter downloads.
+# The token must not be hard-coded in source files.
+if os.environ.get("HF_TOKEN"):
+    os.environ.setdefault("HF_HUB_TOKEN", os.environ["HF_TOKEN"])
+    os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", os.environ["HF_TOKEN"])
+
 MODEL_ID = "Qwen/Qwen3.5-9B"
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MIN_PIXELS = 64 * 28 * 28

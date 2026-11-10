@@ -21,14 +21,19 @@ KhanhChien/Data-Qwen3.5-SFT-Grd-Only
 Recommended: H100/A100 80GB. The code also supports multi-GPU `torchrun`.
 
 ```bash
-git clone https://github.com/khanhchien23/Finetune-Qwen3.5-SFT-New.git
-cd Finetune-Qwen3.5-SFT-New/grd_vast_experiments
+git clone https://github.com/khanhchien23/Ground-Qwen35-SFT-Vast-Experiments.git
+cd Ground-Qwen35-SFT-Vast-Experiments
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-huggingface-cli login
+export HF_TOKEN='YOUR_HUGGINGFACE_TOKEN'
+# Optional verification; login is not required by the training scripts.
+huggingface-cli whoami --token "$HF_TOKEN"
 ```
 
 If the folder is uploaded to a separate repository, clone that repository instead.
+
+`HF_TOKEN` is used automatically for the dataset/model download and Hugging Face
+adapter upload. Never commit the real token to GitHub.
 
 ## Train direct-label
 
@@ -70,11 +75,14 @@ Download `data/selected_grd_only_real.parquet` from the dataset repository. For 
 
 ```bash
 python - <<'PY'
+import os
 from huggingface_hub import hf_hub_download
+token = os.environ["HF_TOKEN"]
 hf_hub_download(
     'KhanhChien/Data-Qwen3.5-SFT-Grd-Only',
     'data/selected_grd_only_real.parquet',
     repo_type='dataset',
+    token=token,
     local_dir='./data',
 )
 PY
