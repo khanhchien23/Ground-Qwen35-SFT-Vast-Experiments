@@ -16,14 +16,17 @@ def main():
     # Consume our additional argument, forwarding all shared CLI options.
     import argparse
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--prompt-parquet", type=Path, required=True)
+    parser.add_argument("--prompt-parquet", type=Path)
     parser.add_argument("--mode", choices=["direct", "answer_only"], default="answer_only")
     args, remaining = parser.parse_known_args()
-    prompts = pq.read_table(args.prompt_parquet, columns=["system_prompt", "user_prompt"])
-    if not len(prompts):
-        raise ValueError("Prompt Parquet is empty")
-    engine.SYSTEM_PROMPT = prompts["system_prompt"][0].as_py()
-    engine.USER_PROMPT = prompts["user_prompt"][0].as_py()
+    if args.mode == "answer_only":
+        if args.prompt_parquet is None:
+            parser.error("--prompt-parquet is required for answer_only")
+        prompts = pq.read_table(args.prompt_parquet, columns=["system_prompt", "user_prompt"])
+        if not len(prompts):
+            raise ValueError("Prompt Parquet is empty")
+        engine.SYSTEM_PROMPT = prompts["system_prompt"][0].as_py()
+        engine.USER_PROMPT = prompts["user_prompt"][0].as_py()
 
     original_loader = engine.items_from_data
 

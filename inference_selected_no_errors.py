@@ -163,7 +163,8 @@ def infer_batch(rows, processor, model, max_new_tokens):
             prompts.append(processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True, enable_thinking=ENABLE_THINKING))
             images.append(image)
-        inputs = processor(text=prompts, images=images, padding=True, return_tensors="pt").to("cuda:0")
+        inputs = processor(text=prompts, images=images, padding=True,
+                           truncation=False, return_tensors="pt").to("cuda:0")
         with torch.inference_mode():
             output = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False,
                                     pad_token_id=processor.tokenizer.pad_token_id)
@@ -171,7 +172,7 @@ def infer_batch(rows, processor, model, max_new_tokens):
         new_ids = output[:, inputs["input_ids"].shape[1]:]
         decoded = processor.batch_decode(new_ids, skip_special_tokens=False)
         elapsed = time.monotonic() - started
-        return [(parse_answer(raw := "<think>\n" + text), raw, int(ids.shape[0]), elapsed)
+        return [(parse_answer(raw := ("<think>\n" if ENABLE_THINKING else "") + text), raw, int(ids.shape[0]), elapsed)
                 for ids, text in zip(new_ids, decoded)]
     finally:
         for image in images:
@@ -184,23 +185,19 @@ def main():
     parser.add_argument("--adapter", required=True, help="Local adapter dir or HF repo")
     parser.add_argument("--checkpoint", default="", help="HF checkpoint subdirectory, e.g. epoch-2 checkpoint")
     parser.add_argument("--output", type=Path, default=Path("epoch2_predictions.csv"))
-    parser.add_argument("--max-new-tokens", type=int, default=384)
-    parser.add_argument("--batch-size", type=int, default=32,
-                        help="Images per generation batch; 32 is a starting point for an 80GB GPU")
+    parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Start at 1 on 32-48GB GPUs; increase after measuring VRAM")
     parser.add_argument("--limit", type=int, default=0, help="0=all")
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--mode", choices=["direct", "answer_only"], default="answer_only")
     args = parser.parse_args()
     global ENABLE_THINKING, SYSTEM_PROMPT, USER_PROMPT
     ENABLE_THINKING = args.mode == "answer_only"
-    if ENABLE_THINKING:
-        USER_PROMPT = ("Inspect this military vehicle carefully. Provide a structured 4-step visual analysis "
-                       "inside <think>...</think> and conclude with the exact class label inside <answer>...</answer>.")
-    else:
-        SYSTEM_PROMPT = ("Classify the Ground military vehicle in the image into exactly one of these classes: "
-                         + ", ".join(c for c in VALID_81_CLASSES if c.startswith("Grd."))
-                         + ". Return only <answer>Exact_Class_Name</answer>.")
+    if not ENABLE_THINKING:
         SYSTEM_PROMPT, USER_PROMPT = DIRECT_SYSTEM, DIRECT_USER
+    if args.max_new_tokens is None:
+        args.max_new_tokens = 384 if ENABLE_THINKING else 32
     if args.max_new_tokens < 1 or args.limit < 0 or args.batch_size < 1:
         parser.error("--max-new-tokens/--batch-size must be positive and --limit must be >= 0")
     rows = items_from_data(args.data.resolve())
@@ -218,7 +215,8 @@ def main():
         return
     adapter = resolve_adapter(args.adapter, args.checkpoint) if args.checkpoint else resolve_adapter(args.adapter, "")
     processor, model = load_model(adapter)
-    with args.output.open("a", newline="", encoding="utf-8") as csv_file, log_path.open("a", encoding="utf-8") as log_file, jsonl_path.open("a", encoding="utf-8") as json_file:
+    file_mode = "w" if args.no_resume else "a"
+    with args.output.open(file_mode, newline="", encoding="utf-8") as csv_file, log_path.open(file_mode, encoding="utf-8") as log_file, jsonl_path.open(file_mode, encoding="utf-8") as json_file:
         writer = csv.DictWriter(csv_file, fieldnames=FIELDS)
         if csv_file.tell() == 0:
             writer.writeheader()
@@ -229,7 +227,7 @@ def main():
             except torch.cuda.OutOfMemoryError as exc:
                 torch.cuda.empty_cache()
                 raise RuntimeError(
-                    f"CUDA OOM with batch_size={len(batch)}. Re-run with --batch-size 16 or 8."
+                    f"CUDA OOM with batch_size={len(batch)}. Reduce --batch-size (try 1)."
                 ) from exc
             for index, (row, (prediction, raw, tokens, seconds)) in enumerate(zip(batch, results), offset + 1):
                 gt = row.get("ground_truth", "")
