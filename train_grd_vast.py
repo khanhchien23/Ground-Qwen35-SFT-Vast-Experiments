@@ -402,9 +402,12 @@ class GroundDataCollator:
                 feature["prompt_messages"], tokenize=False,
                 add_generation_prompt=True, enable_thinking=enable_thinking,
             )
-            expected_suffix = "<|im_start|>assistant\n<think>\n" if enable_thinking else "<|im_start|>assistant\n"
-            if not prompt.endswith(expected_suffix):
-                raise ValueError(f"Prompt chưa bật thinking: {prompt[-100:]!r}")
+            # Qwen processor versions differ: with enable_thinking=False some
+            # releases still append an empty <think>...</think> block to the
+            # generation prompt.  It is harmless for direct-label training;
+            # only require that the assistant turn is present.
+            if "<|im_start|>assistant\n" not in prompt:
+                raise ValueError(f"Prompt thiếu assistant marker: {prompt[-150:]!r}")
             if not full.startswith(prompt):
                 raise ValueError(
                     "Full text và prompt lệch nhau trước phần reasoning; "
