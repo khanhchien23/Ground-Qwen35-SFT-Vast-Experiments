@@ -46,7 +46,11 @@ def main():
         return selected
 
     engine.items_from_data = ground_items
-    sys.argv = [sys.argv[0]] + remaining + ["--mode", "direct" if args.mode == "direct" else "answer_only"]
+    # Scheduled CoT and answer_only use the same CoT inference path. The
+    # shared engine needs only the boolean thinking behavior; the wrapper keeps
+    # the public mode name for experiment bookkeeping.
+    engine_mode = "direct" if args.mode == "direct" else "answer_only"
+    sys.argv = [sys.argv[0]] + remaining + ["--mode", engine_mode]
     engine.main()
 
 
