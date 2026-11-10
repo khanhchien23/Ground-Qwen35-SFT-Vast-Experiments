@@ -29,8 +29,11 @@ OUTPUT = "/data/outputs/grd_scheduled_cot"
 app = modal.App("qwen35-grd-scheduled-cot")
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
-# causal-conv1d prevents Qwen3.5 from falling back to the much slower pure
-# PyTorch convolution path.  flash-linear-attention is retained for Qwen MTP.
+# Keep the Modal image source-build free.  causal-conv1d currently has no
+# compatible wheel for Modal's torch 2.15/cu132 image and its source package
+# requires nvcc, which is not present in debian_slim.  Qwen falls back to its
+# reference PyTorch implementation if the optional package is absent; that is
+# slower but does not affect correctness. flash-linear-attention is retained.
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "git-lfs", "build-essential")
@@ -39,7 +42,6 @@ image = (
         "transformers>=4.57.0", "accelerate>=1.2.0", "peft>=0.14.0",
         "qwen-vl-utils", "datasets", "pyarrow", "huggingface_hub>=0.24",
         "pillow", "tqdm", "tensorboard", "wandb", "flash-linear-attention",
-        "causal-conv1d>=1.5.0",
     )
     .add_local_file(ROOT / "train_grd_vast.py", "/root/train_grd_vast.py")
     .add_local_file(ROOT / "scheduled_cot.py", "/root/scheduled_cot.py")
