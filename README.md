@@ -125,6 +125,25 @@ Unlike Direct, this mode generates reasoning at inference and uses the original
 training prompts. Check whether 512 tokens suffices to reach `</answer>`; do not
 silently treat truncated reasoning as a valid classification output.
 
+## Modal inference using the immutable epoch-1 adapter
+
+After uploading the code with `git pull`, run from Windows CMD:
+
+```cmd
+modal run --detach modal_scheduled_cot_grd.py::infer ^
+  --hf-token %HF_TOKEN% ^
+  --checkpoint epoch-1 ^
+  --batch-size 1 ^
+  --max-new-tokens 512 ^
+  --output-name grd_scheduled_cot_epoch1.csv
+```
+
+The command downloads `selected_grd_only_real.parquet`, filters the 681 Ground
+images, loads `epoch-1` from `KhanhChien/FineTuneQwen35-9B-Grd-ScheduledCoT`,
+and writes CSV/JSONL/log files to the persistent Modal Volume under
+`/data/inference_outputs/`. It uses `--no-resume` so the named result is rebuilt
+from scratch, without training or changing any checkpoint.
+
 CPU tests (no model download): `python -m unittest test_scheduled_cot -v`.
 These verify masking, causal shift, padding, segment length independence and
 loss gradients; an end-to-end Vast.ai GPU run is still required.

@@ -47,6 +47,8 @@ image = (
     .add_local_file(ROOT / "train_grd_vast.py", "/root/train_grd_vast.py")
     .add_local_file(ROOT / "scheduled_cot.py", "/root/scheduled_cot.py")
     .add_local_file(ROOT / "ground_prompts.py", "/root/ground_prompts.py")
+    .add_local_file(ROOT / "inference_selected_no_errors.py", "/root/inference_selected_no_errors.py")
+    .add_local_file(ROOT / "inference_grd_vast.py", "/root/inference_grd_vast.py")
 )
 
 
@@ -155,6 +157,68 @@ def token_or_error(token: str) -> str:
     return token
 
 
+@app.function(
+    image=image,
+    gpu="H100",
+    timeout=24 * 3600,
+    volumes={"/data": volume},
+    cpu=8.0,
+    memory=32768,
+)
+def infer_remote(
+    hf_token: str,
+    dataset_repo: str,
+    adapter_repo: str,
+    checkpoint: str,
+    batch_size: int,
+    max_new_tokens: int,
+    limit: int,
+    output_name: str,
+):
+    authenticate(hf_token)
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    data_path = hf_hub_download(
+        repo_id=dataset_repo,
+        filename="data/selected_grd_only_real.parquet",
+        repo_type="dataset",
+        token=hf_token,
+        local_dir="/data/inference_data",
+    )
+    dataset_snapshot = Path(snapshot_download(
+        repo_id=dataset_repo,
+        repo_type="dataset",
+        token=hf_token,
+        local_dir="/data/datasets/" + dataset_repo.replace("/", "__"),
+        allow_patterns=["data/train*.parquet"],
+    ))
+    prompt_files = sorted(dataset_snapshot.glob("data/train*.parquet"))
+    if not prompt_files:
+        raise FileNotFoundError("No Ground training Parquet found for CoT prompts")
+
+    output = Path("/data/inference_outputs") / output_name
+    output.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable, "/root/inference_grd_vast.py",
+        "--data", data_path,
+        "--prompt-parquet", str(prompt_files[0]),
+        "--adapter", adapter_repo,
+        "--checkpoint", checkpoint,
+        "--mode", "scheduled_cot",
+        "--output", str(output),
+        "--batch-size", str(batch_size),
+        "--max-new-tokens", str(max_new_tokens),
+        "--limit", str(limit),
+        "--no-resume",
+    ]
+    print("--> Modal inference command:", " ".join(cmd), flush=True)
+    try:
+        subprocess.run(cmd, check=True, cwd="/root")
+    finally:
+        volume.commit()
+    print(f"--> Results saved in Modal Volume: {output}", flush=True)
+
+
 @app.local_entrypoint()
 def train(
     hf_token: str = "",
@@ -189,4 +253,26 @@ def train(
         batch_size, grad_accum, lr, save_steps, max_seq_length, model_id,
         logging_steps, eval_steps, lora_r, lora_alpha, output_dir,
         fresh_start,
+    )
+
+
+@app.local_entrypoint()
+def infer(
+    hf_token: str = "",
+    dataset_repo: str = DATASET_REPO,
+    adapter_repo: str = HUB_REPO,
+    checkpoint: str = "epoch-1",
+    batch_size: int = 1,
+    max_new_tokens: int = 512,
+    limit: int = 0,
+    output_name: str = "grd_scheduled_cot_epoch1.csv",
+):
+    """Infer the immutable epoch-1 adapter on all 681 Ground real images."""
+    if batch_size < 1 or max_new_tokens < 1 or limit < 0:
+        raise ValueError("Invalid batch size, max_new_tokens, or limit")
+    if Path(output_name).name != output_name or not output_name.endswith(".csv"):
+        raise ValueError("output_name must be a plain .csv filename")
+    infer_remote.remote(
+        token_or_error(hf_token), dataset_repo, adapter_repo, checkpoint,
+        batch_size, max_new_tokens, limit, output_name,
     )
