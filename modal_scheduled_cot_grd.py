@@ -24,7 +24,7 @@ DATASET_REPO = "KhanhChien/Data-Qwen3.5-SFT-Grd-Only"
 MODEL_ID = "Qwen/Qwen3.5-9B"
 HUB_REPO = "KhanhChien/FineTuneQwen35-9B-Grd-ScheduledCoT"
 VOLUME_NAME = "qwen35-grd-scheduled-cot-volume"
-OUTPUT = "/data/outputs/grd_scheduled_cot"
+DEFAULT_OUTPUT = "/data/outputs/grd_scheduled_cot"
 
 app = modal.App("qwen35-grd-scheduled-cot")
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -80,6 +80,7 @@ def train_remote(
     eval_steps: int,
     lora_r: int,
     lora_alpha: int,
+    output_dir: str,
 ):
     authenticate(hf_token)
     from huggingface_hub import HfApi, snapshot_download
@@ -96,7 +97,7 @@ def train_remote(
         sys.executable, "/root/train_grd_vast.py",
         "--model_id", model_id,
         "--parquet_dir", dataset_dir,
-        "--output_dir", OUTPUT,
+        "--output_dir", output_dir,
         "--mode", "scheduled_cot",
         "--hub_repo", hub_repo,
         "--epochs", str(epochs),
@@ -121,8 +122,8 @@ def train_remote(
 
         # Keep a named immutable adapter for inference even when the next
         # cumulative run later replaces final_adapter on the volume.
-        epoch_dir = Path(OUTPUT) / f"epoch-{stop_after_epoch}"
-        shutil.copytree(Path(OUTPUT) / "final_adapter", epoch_dir, dirs_exist_ok=True)
+        epoch_dir = Path(output_dir) / f"epoch-{stop_after_epoch}"
+        shutil.copytree(Path(output_dir) / "final_adapter", epoch_dir, dirs_exist_ok=True)
         api = HfApi(token=hf_token)
         api.create_repo(repo_id=hub_repo, repo_type="model", exist_ok=True)
         api.upload_folder(
@@ -160,6 +161,7 @@ def train(
     eval_steps: int = 100,
     lora_r: int = 16,
     lora_alpha: int = 32,
+    output_name: str = "grd_scheduled_cot",
 ):
     if epochs != 3:
         raise ValueError("Scheduled CoT requires epochs=3; keep the total schedule fixed")
@@ -167,8 +169,11 @@ def train(
         raise ValueError("stop_after_epoch must be 1, 2, or 3")
     if min(batch_size, grad_accum, save_steps, max_seq_length, logging_steps, eval_steps) < 1:
         raise ValueError("Training parameters must be positive")
+    if Path(output_name).name != output_name or not output_name:
+        raise ValueError("output_name must be a simple directory name")
+    output_dir = f"/data/outputs/{output_name}"
     train_remote.remote(
         token_or_error(hf_token), dataset_repo, hub_repo, epochs, stop_after_epoch,
         batch_size, grad_accum, lr, save_steps, max_seq_length, model_id,
-        logging_steps, eval_steps, lora_r, lora_alpha,
+        logging_steps, eval_steps, lora_r, lora_alpha, output_dir,
     )
