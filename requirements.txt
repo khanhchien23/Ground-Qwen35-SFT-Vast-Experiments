@@ -1,0 +1,14 @@
+torch>=2.6.0
+torchvision
+transformers>=4.57.0
+accelerate>=1.2.0
+peft>=0.14.0
+qwen-vl-utils
+datasets
+pyarrow
+huggingface_hub>=0.24
+pillow
+tqdm
+tensorboard
+wandb
+flash-linear-attention
