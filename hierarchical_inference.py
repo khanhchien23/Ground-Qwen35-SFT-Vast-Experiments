@@ -332,6 +332,23 @@ def main():
                     "router_raw": item["router_raw"], "specialist_raw": raw,
                 })
                 f.flush()
+        # Keep router failures visible in the final report instead of silently
+        # dropping them. No specialist is selected for an unknown domain.
+        for item in routed:
+            if item["predicted_domain"] != "Unknown":
+                continue
+            row = item["row"]
+            gt = row.get("ground_truth", "")
+            writer.writerow({
+                "file_name": row["file_name"], "ground_truth": gt,
+                "router_prediction": item["router_prediction"],
+                "predicted_domain": "Unknown", "selected_adapter": "",
+                "specialist_prediction": "", "router_domain_correct": False,
+                "final_correct": False if gt else "", "router_seconds": item["router_seconds"],
+                "specialist_seconds": "", "router_raw": item["router_raw"],
+                "specialist_raw": "",
+            })
+            f.flush()
     print(f"Saved: {output}")
 
 
