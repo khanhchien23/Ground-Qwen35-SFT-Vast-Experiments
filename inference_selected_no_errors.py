@@ -31,6 +31,7 @@ peft.import_utils.is_torchao_available = lambda: False
 import peft.tuners.lora.torchao
 peft.tuners.lora.torchao.is_torchao_available = lambda: False
 from peft import PeftModel
+from ground_prompts import DIRECT_SYSTEM, DIRECT_USER
 
 # Hugging Face Hub reads this environment variable for private adapter downloads.
 # The token must not be hard-coded in source files.
@@ -199,7 +200,7 @@ def main():
         SYSTEM_PROMPT = ("Classify the Ground military vehicle in the image into exactly one of these classes: "
                          + ", ".join(c for c in VALID_81_CLASSES if c.startswith("Grd."))
                          + ". Return only <answer>Exact_Class_Name</answer>.")
-        USER_PROMPT = "Inspect the image and return only the exact Ground class in <answer>...</answer>."
+        SYSTEM_PROMPT, USER_PROMPT = DIRECT_SYSTEM, DIRECT_USER
     if args.max_new_tokens < 1 or args.limit < 0 or args.batch_size < 1:
         parser.error("--max-new-tokens/--batch-size must be positive and --limit must be >= 0")
     rows = items_from_data(args.data.resolve())

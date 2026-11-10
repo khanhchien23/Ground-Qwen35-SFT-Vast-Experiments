@@ -27,6 +27,7 @@ from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+from ground_prompts import DIRECT_SYSTEM, DIRECT_USER, GROUND_CLASSES
 
 # Hugging Face authentication is intentionally read from the environment.
 # Never put a real token in this repository or in a command committed to Git.
@@ -350,7 +351,10 @@ class MilitaryCoTSFTDataset(Dataset):
         # Direct mode reuses the existing records and changes only the target;
         # answer_only keeps the old CoT but trains loss only on <answer>...</answer>.
         gt_class = str(item.get("gt_class", "")).strip()
+        if gt_class not in GROUND_CLASSES:
+            raise ValueError(f"Invalid Ground target: {gt_class!r}")
         if self.mode == "direct":
+            sys_text, user_text = DIRECT_SYSTEM, DIRECT_USER
             assistant_text = f"<answer>{gt_class}</answer>"
 
         prompt_messages = [
@@ -423,13 +427,20 @@ class GroundDataCollator:
             image_kwargs = {"images": [f["image"] for f in features]}
 
         batch = self.processor(
-            text=full_texts, **image_kwargs, padding=True, truncation=True,
-            max_length=self.max_seq_length, return_tensors="pt",
+            text=full_texts, **image_kwargs, padding=True, truncation=False,
+            return_tensors="pt",
         )
         prompt_batch = self.processor(
-            text=prompt_texts, **image_kwargs, padding=True, truncation=True,
-            max_length=self.max_seq_length, return_tensors="pt",
+            text=prompt_texts, **image_kwargs, padding=True, truncation=False,
+            return_tensors="pt",
         )
+        lengths = batch["attention_mask"].sum(dim=1).tolist()
+        if max(lengths) > self.max_seq_length:
+            raise ValueError(
+                f"Full multimodal sequence requires {max(lengths)} tokens; "
+                f"--max_seq_length={self.max_seq_length}. Increase the limit "
+                "(try 1280); image/answer tokens must never be truncated."
+            )
         labels = batch["input_ids"].clone()
         labels[batch["attention_mask"] == 0] = -100
         for i in range(len(features)):
@@ -446,6 +457,7 @@ class GroundDataCollator:
             labels[i, start:start + prompt_len] = -100
             if self.mode == "answer_only":
                 # Keep loss only on the answer span; CoT tokens remain context.
+                assistant = features[i]["full_messages"][-1]["content"][0]["text"]
                 answer_text = assistant[assistant.find("<answer>"):assistant.find("</answer>") + len("</answer>")]
                 answer_ids = self.processor.tokenizer(answer_text, add_special_tokens=False)["input_ids"]
                 seq = batch["input_ids"][i].tolist()
